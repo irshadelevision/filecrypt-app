@@ -341,6 +341,79 @@ final class FileCipherIntegrityTests: TemporaryDirectoryTestCase {
         )
     }
 
+    /// A destination that is already a directory must be rejected *before* any
+    /// work happens. It used to be caught only by `rename()` at the very end,
+    /// after the whole file had been through Argon2id and AES-GCM.
+    func testDestinationThatIsADirectoryIsRejectedImmediately() throws {
+        let source = try makePayload(byteCount: 4 * 1_024 * 1_024)
+        let sourceURL = try write(source, to: path("src.bin"))
+
+        let directory = path("outdir")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let started = CFAbsoluteTimeGetCurrent()
+        XCTAssertThrowsError(
+            try FileCipher.encryptFile(at: sourceURL, to: directory, password: password, options: options)
+        ) { error in
+            XCTAssertEqual(error as? CryptoError, .destinationIsDirectory(name: "outdir"))
+        }
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        // The check is a stat, not a stream: 4 MiB should not have been hashed.
+        XCTAssertLessThan(elapsed, 1.0, "the destination was only validated after doing the work")
+
+        // And nothing was written into the directory.
+        let contents = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        XCTAssertTrue(contents.isEmpty, "a temporary file was created for an impossible destination")
+    }
+
+    func testDecryptDestinationThatIsADirectoryIsRejected() throws {
+        let (container, _) = try buildContainer(recordChunkSize: 4_096, recordCount: 2)
+        let directory = path("decrypt-outdir")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        XCTAssertThrowsError(
+            try FileCipher.decryptFile(at: container, to: directory, password: password)
+        ) { error in
+            XCTAssertEqual(error as? CryptoError, .destinationIsDirectory(name: "decrypt-outdir"))
+        }
+    }
+
+    /// `fileExists` follows symlinks, so a link to a directory is a directory.
+    func testDestinationSymlinkedToADirectoryIsRejected() throws {
+        let source = try write(makePayload(byteCount: 1_024), to: path("src.bin"))
+        let directory = path("real-dir")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let link = path("dir-link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: directory)
+
+        XCTAssertThrowsError(
+            try FileCipher.encryptFile(at: source, to: link, password: password, options: options)
+        ) { error in
+            XCTAssertEqual(error as? CryptoError, .destinationIsDirectory(name: "dir-link"))
+        }
+    }
+
+    /// A dangling symlink is a legitimate destination: the rename replaces the
+    /// link itself, which is how every Unix tool behaves.
+    func testDanglingSymlinkDestinationIsAllowed() throws {
+        let plain = makePayload(byteCount: 2_048)
+        let source = try write(plain, to: path("src.bin"))
+
+        let link = path("dangling-link")
+        try FileManager.default.createSymbolicLink(
+            at: link,
+            withDestinationURL: path("does-not-exist")
+        )
+
+        try FileCipher.encryptFile(at: source, to: link, password: password, options: options)
+
+        let restored = path("dangling.out")
+        try FileCipher.decryptFile(at: link, to: restored, password: password)
+        XCTAssertEqual(try Data(contentsOf: restored), plain)
+    }
+
     func testMissingDestinationFolderIsRejected() throws {
         let source = try write(makePayload(byteCount: 100), to: path("src.bin"))
         let badDestination = path("no-such-folder").appendingPathComponent("out.fcrypt")

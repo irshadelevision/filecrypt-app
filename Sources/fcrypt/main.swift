@@ -34,8 +34,24 @@ struct Arguments {
 
     init(_ raw: [String]) {
         var index = 0
+        var optionsEnded = false
+
         while index < raw.count {
             let token = raw[index]
+
+            // A bare `--` ends option parsing, so a path that begins with a
+            // dash can still be named: `fcrypt encrypt -- --weird out`.
+            if token == "--", !optionsEnded {
+                optionsEnded = true
+                index += 1
+                continue
+            }
+
+            if optionsEnded {
+                positional.append(token)
+                index += 1
+                continue
+            }
 
             if token.hasPrefix("--") {
                 let name = String(token.dropFirst(2))
@@ -161,6 +177,8 @@ OPTIONS:
   --parallelism <n>      Argon2id lanes (default 1, max 16).
   --chunk-size <n>       Plaintext bytes per record (default 1048576).
   --quiet                Suppress progress output.
+  --                     Treat everything after this as a file path, so a name
+                         that begins with a dash can still be used.
 
 GENERATE OPTIONS:
   --length <n>           Characters to generate (default 20, 8..256).

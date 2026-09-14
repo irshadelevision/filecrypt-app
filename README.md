@@ -461,8 +461,8 @@ Everything above is tested, but two things are worth being explicit about:
 ## Testing
 
 ```bash
-swift test                # 109 tests
-./Scripts/smoke.sh        # 78 black-box checks
+swift test                # 114 tests
+./Scripts/smoke.sh        # 83 black-box checks
 ./Scripts/largefile_check.sh --size 16G
 ```
 
@@ -477,12 +477,12 @@ permitted`, you are already inside a sandbox that forbids nested sandboxing. Add
 | `Argon2Tests` | 6 | Known-answer vectors from the reference `argon2` CLI, parameter bounds, memory cost actually dominating runtime |
 | `KeyDerivationTests` | 12 | PBKDF2-SHA512 vectors, HKDF-SHA256 against RFC 5869, NFC normalisation, commitment verification |
 | `FileCipherRoundTripTests` | 12 | Sizes straddling the chunk boundary, empty files, Unicode passwords, deterministic container layout |
-| `FileCipherIntegrityTests` | 25 | Truncation at eight offsets, record reordering and replay, bit flips in *every* header byte, cancellation, permissions, temporary-file cleanup |
+| `FileCipherIntegrityTests` | 29 | Truncation at eight offsets, record reordering and replay, bit flips in *every* header byte, cancellation, permissions, temporary-file cleanup |
 | `ByteCodingTests` | 6 | Exact byte order of the framing helpers |
 | `InteropTests` | 9 | A golden container per format, produced by an independent implementation |
 | `MemoryFootprintTests` | 2 | Memory does not scale with file size (4 MiB vs 48 MiB) — see the note below |
 | `PasswordGeneratorTests` | 16 | Length, pool membership, class guarantees, look-alike exclusion, chi-square uniformity, entropy |
-| `AppModelTests` | 21 | Mode switching, destination naming, validation, overwrite prompt, cancel, full round trip through the model |
+| `AppModelTests` | 22 | Mode switching, destination naming, validation, overwrite prompt, cancel, full round trip through the model |
 
 ### Interoperability
 
@@ -533,7 +533,7 @@ cause; twelve consecutive full runs are clean.
 ./Scripts/smoke.sh
 ```
 
-78 black-box checks against the real binary: round trips at seven sizes, every
+83 black-box checks against the real binary: round trips at seven sizes, every
 password source, password generation, the error paths (wrong password, missing
 input, input equal to output, unparseable options), ten different tamperings of a
 real container, and interoperability in both directions.
@@ -625,8 +625,8 @@ Sources/FileCrypt/              the SwiftUI app
 
 Sources/CArgon2/                vendored phc-winner-argon2, see NOTICE.md
 Sources/fcrypt/                 the command-line tool
-Tests/FileCryptCoreTests/       88 tests (engine)
-Tests/FileCryptAppTests/        21 tests (app behaviour)
+Tests/FileCryptCoreTests/       91 tests (engine)
+Tests/FileCryptAppTests/        22 tests (app behaviour)
 Scripts/smoke.sh                black-box end-to-end suite
 Scripts/largefile_check.sh      large-file round trip
 Scripts/counter_pattern.py      offset-encoding generator/verifier
@@ -648,6 +648,13 @@ from a backup.
 **"The password is incorrect, or the file has been modified."**
 Exactly what it says. Argon2id is deterministic, so the same password on the same
 container always works; if it does not, the password is wrong.
+
+**"…is a folder. Choose a file name for the result, not a folder."**
+The destination you picked is an existing directory. The app checks this before
+doing any work, so nothing was encrypted.
+
+**A filename beginning with a dash is rejected as an unknown option.**
+Put `--` before the paths: `fcrypt encrypt --password pw -- ./--weird out.fcrypt`.
 
 **Decryption is slow to start.**
 That is Argon2id, and it is the point. 64 MiB and 3 passes takes about 0.16 s;

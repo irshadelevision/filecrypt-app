@@ -474,6 +474,23 @@ public enum FileCipher {
         guard FileManager.default.fileExists(atPath: directory.path) else {
             throw CryptoError.ioError("The destination folder \"\(directory.lastPathComponent)\" does not exist.")
         }
+
+        // The destination itself must not already be a directory.
+        //
+        // Without this the run proceeds all the way to `rename()`, which fails
+        // with EISDIR only after the whole file has been through Argon2id and
+        // AES-GCM — minutes of work and a full-size temporary file, for a
+        // destination that could never have worked. The GUI would be worse
+        // still: `fileExists` is true for a directory, so it would first ask
+        // the user to confirm replacing it.
+        //
+        // `fileExists` follows symlinks, so this also rejects a symlink that
+        // points at a directory.
+        var outputIsDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: output.path, isDirectory: &outputIsDirectory),
+           outputIsDirectory.boolValue {
+            throw CryptoError.destinationIsDirectory(name: output.lastPathComponent)
+        }
     }
 
     private static func validate(options: EncryptionOptions) throws -> Int {

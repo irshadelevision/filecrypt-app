@@ -405,6 +405,35 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(model.isRunning)
     }
 
+    func testADirectoryDestinationIsReportedRatherThanOfferedForReplacement() throws {
+        let plain = try makeFile("into-dir.bin", bytes: 500)
+        let model = makeModel()
+        model.setInputFile(plain)
+        model.password = "pw"
+        model.confirmPassword = "pw"
+
+        // Point the destination at a real directory.
+        let directory = path("destination-folder")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        model.setDestinationForTesting(directory)
+
+        model.primaryAction()
+
+        // It must not ask to "replace" a folder, and must not start.
+        XCTAssertFalse(model.isShowingOverwriteConfirmation)
+        XCTAssertFalse(model.isRunning)
+        XCTAssertTrue(model.isShowingError)
+        XCTAssertTrue(
+            model.errorMessage?.contains("is a folder") == true,
+            "unexpected message: \(model.errorMessage ?? "nil")"
+        )
+
+        // The directory is untouched.
+        XCTAssertTrue(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty
+        )
+    }
+
     // MARK: - Cancellation
 
     func testCancellingLeavesNoOutputAndNoErrorBanner() async throws {

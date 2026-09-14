@@ -32,6 +32,8 @@ public enum CryptoError: Error, LocalizedError, Equatable {
     case wrongPassword
     /// Input and output resolved to the same path.
     case inputAndOutputAreSame
+    /// The destination path is an existing directory.
+    case destinationIsDirectory(name: String)
     /// The random number generator refused to produce bytes.
     case randomGenerationFailed
     /// The platform KDF returned a failure status.
@@ -65,6 +67,8 @@ public enum CryptoError: Error, LocalizedError, Equatable {
             return "The password is incorrect, or the file has been modified."
         case .inputAndOutputAreSame:
             return "The source and destination are the same file."
+        case .destinationIsDirectory(let name):
+            return "\"\(name)\" is a folder. Choose a file name for the result, not a folder."
         case .randomGenerationFailed:
             return "The system could not produce secure random bytes."
         case .keyDerivationFailed(let status):
@@ -88,6 +92,8 @@ public enum CryptoError: Error, LocalizedError, Equatable {
             return "Switch to Encrypt mode, or pick a file that ends in .fcrypt."
         case .argon2Failed:
             return "The file itself is fine; only the Argon2 parameters were a problem."
+        case .destinationIsDirectory:
+            return "Pick a different name, or choose another folder."
         case .cancelled:
             return nil
         default:

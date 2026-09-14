@@ -128,6 +128,23 @@ refuses "info on a non-container is refused" "$BIN" info "$WORK/plain"
 refuses "unknown command is refused" "$BIN" frobnicate a b
 refuses "too few arguments is refused" "$BIN" encrypt only-one.fcrypt
 
+# A destination that is already a directory must be caught up front, not by
+# rename() after the whole file has been encrypted.
+mkdir -p "$WORK/destdir"
+refuses "a directory destination is refused" "$BIN" encrypt --password pw "$WORK/plain" "$WORK/destdir"
+check   "nothing was written into the directory" test -z "$(ls -A "$WORK/destdir")"
+
+# `--` ends option parsing, so a path beginning with a dash is usable.
+mkdir -p "$WORK/dashdir"
+printf 'dash payload' > "$WORK/dashdir/--dashfile"
+if ( cd "$WORK/dashdir" && "$OLDPWD/$BIN" encrypt --quiet --password pw -- ./--dashfile out.fcrypt 2>/dev/null ) &&
+   ( cd "$WORK/dashdir" && "$OLDPWD/$BIN" decrypt --quiet --password pw -- out.fcrypt back 2>/dev/null ) &&
+   cmp -s "$WORK/dashdir/--dashfile" "$WORK/dashdir/back"; then
+	ok "-- ends option parsing for dash-prefixed paths"
+else
+	bad "-- ends option parsing for dash-prefixed paths"
+fi
+
 # ---------------------------------------------------------------------------
 echo
 echo "Tamper detection"
@@ -247,6 +264,30 @@ fi
 refuses "a too-short --length is refused" "$BIN" generate --length 3
 refuses "an unparseable --length is refused" "$BIN" generate --length abc
 refuses "an out-of-range --count is refused" "$BIN" generate --count 99999
+
+# --no-required-classes drops the "one of every type" guarantee. Statistically
+# it must sometimes produce a password missing a class, which is the only way
+# to tell it apart from the default.
+missing_class=0
+for _ in $(seq 1 40); do
+	value=$("$BIN" generate --quiet --length 8 --no-required-classes 2>/dev/null)
+	case "$value" in
+		*[0-9]*) ;;
+		*) missing_class=$((missing_class + 1)) ;;
+	esac
+done
+[ "$missing_class" -gt 0 ] 	&& ok "--no-required-classes can omit a character class" 	|| bad "--no-required-classes behaved like the default"
+
+# ...while the default never does, over the same number of draws.
+missing_default=0
+for _ in $(seq 1 40); do
+	value=$("$BIN" generate --quiet --length 8 2>/dev/null)
+	case "$value" in
+		*[0-9]*) ;;
+		*) missing_default=$((missing_default + 1)) ;;
+	esac
+done
+[ "$missing_default" -eq 0 ] 	&& ok "the default always includes every class" 	|| bad "the default omitted a class $missing_default times"
 
 # ---------------------------------------------------------------------------
 echo

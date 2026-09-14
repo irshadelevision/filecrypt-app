@@ -336,13 +336,28 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
+    /// Point the destination somewhere specific. Used by tests to exercise
+    /// destinations the save panel would not normally produce.
+    func setDestinationForTesting(_ url: URL) {
+        destinationURL = url
+    }
+
     // MARK: - Running
 
     func primaryAction() {
         guard let inputURL else { return }
         let destination = destinationURL ?? defaultDestination(for: inputURL, mode: mode)
 
-        if FileManager.default.fileExists(atPath: destination.path) {
+        // A directory at the destination is not something to "replace", so it
+        // must not reach the overwrite prompt. Reporting it here avoids both
+        // the misleading question and a full encrypt-then-fail cycle.
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory) {
+            if isDirectory.boolValue {
+                present(error: "\u{201C}\(destination.lastPathComponent)\u{201D} is a folder. "
+                    + "Choose a file name for the result, or pick another folder.")
+                return
+            }
             pendingDestination = destination
             isShowingOverwriteConfirmation = true
             return
