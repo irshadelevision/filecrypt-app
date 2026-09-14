@@ -1,0 +1,22 @@
+# Build products
+.build/
+build/
+*.app
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+._*
+
+# SwiftPM
+.swiftpm/
+Package.resolved
+
+# Python
+__pycache__/
+*.pyc

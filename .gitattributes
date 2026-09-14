@@ -1,0 +1,15 @@
+# Normalise line endings in the repository, whatever the contributor's platform.
+* text=auto eol=lf
+
+# Shell scripts must keep LF or they fail with "bad interpreter" on macOS.
+*.sh text eol=lf
+*.py text eol=lf
+*.swift text eol=lf
+
+# Vendored upstream sources: leave byte-exact so they can be diffed against
+# the upstream tag.
+Sources/CArgon2/** -text
+
+# Binary
+*.icns binary
+*.png binary
