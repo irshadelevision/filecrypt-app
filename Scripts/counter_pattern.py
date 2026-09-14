@@ -3,7 +3,7 @@
 #  counter_pattern.py
 #  FileCrypt
 #
-#  Copyright (c) 2026 Irshad
+#  Copyright (c) 2026 Irshad Ibrahim
 #  SPDX-License-Identifier: MIT
 #
 """Generate and verify a large file whose every 8 bytes encode their own offset.

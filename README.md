@@ -10,6 +10,7 @@ No account, no network, no keychain, no telemetry, no recovery. The password is
 the only thing that can open the file, and it never leaves the Mac.
 
 **Free and open source**, under the [MIT License](LICENSE).
+Written by **Irshad Ibrahim**.
 
 ---
 
@@ -692,8 +693,10 @@ Run `./build.sh` first — it resolves the C target and the vendored Argon2.
 FileCrypt is released under the **MIT License**. The full text is in
 [`LICENSE`](LICENSE).
 
+**Author:** Irshad Ibrahim — <https://github.com/irshadelevision>
+
 ```
-Copyright (c) 2026 Irshad
+Copyright (c) 2026 Irshad Ibrahim
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

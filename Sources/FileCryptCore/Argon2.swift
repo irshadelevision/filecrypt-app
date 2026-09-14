@@ -2,7 +2,7 @@
 //  Argon2.swift
 //  FileCrypt
 //
-//  Copyright (c) 2026 Irshad
+//  Copyright (c) 2026 Irshad Ibrahim
 //  SPDX-License-Identifier: MIT
 //
 import CArgon2

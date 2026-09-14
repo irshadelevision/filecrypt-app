@@ -3,7 +3,7 @@
 #  reference_fcrypt.py
 #  FileCrypt
 #
-#  Copyright (c) 2026 Irshad
+#  Copyright (c) 2026 Irshad Ibrahim
 #  SPDX-License-Identifier: MIT
 #
 """Independent reference implementation of the FileCrypt container format.

@@ -3,7 +3,7 @@
 //  make_icon.swift
 //  FileCrypt
 //
-//  Copyright (c) 2026 Irshad
+//  Copyright (c) 2026 Irshad Ibrahim
 //  SPDX-License-Identifier: MIT
 //
 //
