@@ -36,7 +36,7 @@ or on how a language represents a byte buffer.
 | 8 | 1 | format version | `2` |
 | 9 | 1 | KDF identifier | `2` = Argon2id |
 | 10 | 1 | cipher identifier | `1` = AES-256-GCM (96-bit nonce, 128-bit tag) |
-| 11 | 1 | flags | `0`; any other value is a hard error |
+| 11 | 1 | flags | bit 0 = payload is a folder archive; unknown bits are a hard error |
 | 12 | 4 | chunk size | plaintext bytes per record |
 | 16 | 4 | memory | Argon2id memory cost, KiB |
 | 20 | 4 | time cost | Argon2id passes |
@@ -53,7 +53,7 @@ or on how a language represents a byte buffer.
 | 8 | 1 | format version | `1` |
 | 9 | 1 | KDF identifier | `1` = PBKDF2-HMAC-SHA512 |
 | 10 | 1 | cipher identifier | `1` = AES-256-GCM |
-| 11 | 1 | flags | `0` |
+| 11 | 1 | flags | `0` in practice; bit 0 is defined but unused by format 1 |
 | 12 | 4 | chunk size | plaintext bytes per record |
 | 16 | 4 | PBKDF2 iterations | work factor |
 | 20 | 4 | header size | `88` |
@@ -121,6 +121,37 @@ the commitment field itself (`prefixSize` is 64 for format 2, 56 for format 1).
 A reader recomputes it and compares in constant time; a mismatch means the
 password is wrong (or the header was altered), and the reader must stop before
 touching any record.
+
+## Flags
+
+| Bit | Meaning |
+|----:|---------|
+| 0 | The plaintext is a `tar` archive of a folder rather than a single file's bytes |
+| 1-7 | Reserved. A reader must reject a container that sets any of them. |
+
+A reader that does not understand bit 0 must reject the container rather than
+treat the payload as a file, which is what the reserved byte exists for.
+
+## Folder archives
+
+When bit 0 is set the plaintext is a **POSIX `ustar` archive**, extended with
+**PAX** records where `ustar` cannot express a value (a path longer than 100
+bytes, a link target longer than 100 bytes, a file larger than 8 GiB).
+
+An extractor must treat the archive as untrusted input:
+
+* reject absolute paths and any path containing a `..` or `.` component,
+* reject an entry whose path lies beneath a symlink created by an earlier
+  entry, since writing through such a link escapes the destination,
+* refuse to write outside the destination directory after path standardisation.
+
+Symlinks are stored as symlinks and never followed, both to preserve them and
+because following one turns a link loop into a non-terminating walk.
+
+The archive's single top-level directory entry names the original folder. A
+caller that names the destination explicitly should unwrap it, so restoring
+`Project.fcrypt` to `Restored` yields `Restored/README.md` rather than
+`Restored/Project/README.md`.
 
 ## Records
 

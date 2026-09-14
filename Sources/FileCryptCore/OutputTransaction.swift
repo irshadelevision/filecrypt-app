@@ -15,7 +15,7 @@ import Foundation
 ///   half-written file where the user's data used to be,
 /// * the rename is atomic, so a crash mid-run cannot produce a torn output,
 /// * an existing destination is only replaced at the very last moment.
-final class OutputTransaction {
+final class OutputTransaction: ByteSink {
 
     private let destination: URL
     private let temporaryURL: URL

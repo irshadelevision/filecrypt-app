@@ -238,7 +238,7 @@ final class FileCipherIntegrityTests: TemporaryDirectoryTestCase {
         XCTAssertThrowsError(try mutate(8, 3))     // version disagrees with the magic
         XCTAssertThrowsError(try mutate(9, 9))     // unknown kdf
         XCTAssertThrowsError(try mutate(10, 9))    // unknown cipher
-        XCTAssertThrowsError(try mutate(11, 0x01)) // unknown flags
+        XCTAssertThrowsError(try mutate(11, 0x02)) // unknown flag bit
 
         // Header size field (offset 28 in format 2) must agree with the layout.
         var wrongSize = good

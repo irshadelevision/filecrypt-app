@@ -218,6 +218,58 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
+echo "Folder encryption"
+# ---------------------------------------------------------------------------
+FOLDER="$WORK/Project"
+mkdir -p "$FOLDER/src/nested" "$FOLDER/empty"
+printf 'readme' > "$FOLDER/README.md"
+dd if=/dev/urandom of="$FOLDER/src/data.bin" bs=1k count=200 2>/dev/null
+printf 'deep' > "$FOLDER/src/nested/deep.txt"
+ln -s README.md "$FOLDER/link"
+
+"$BIN" encrypt --quiet --password 'folder pw' "$FOLDER" "$WORK/Project.fcrypt" 2>/dev/null &&
+	ok "a folder encrypts to one container" || bad "a folder encrypts to one container"
+
+"$BIN" info "$WORK/Project.fcrypt" 2>/dev/null | grep -q "folder (tar archive)" &&
+	ok "the container reports that it holds a folder" || bad "the container reports its contents"
+
+"$BIN" decrypt --quiet --password 'folder pw' "$WORK/Project.fcrypt" "$WORK/Restored" 2>/dev/null &&
+	diff -r "$FOLDER" "$WORK/Restored" >/dev/null 2>&1 &&
+	ok "the restored tree is identical" || bad "the restored tree is identical"
+
+[ -f "$WORK/Restored/README.md" ] &&
+	ok "the archive root is unwrapped into the destination" || bad "the archive root is unwrapped"
+
+[ -L "$WORK/Restored/link" ] &&
+	ok "symlinks are preserved" || bad "symlinks are preserved"
+
+[ -d "$WORK/Restored/empty" ] &&
+	ok "empty folders are preserved" || bad "empty folders are preserved"
+
+cmp -s "$FOLDER/src/data.bin" "$WORK/Restored/src/data.bin" &&
+	ok "nested file contents match" || bad "nested file contents match"
+
+refuses "the wrong password leaves no folder" "$BIN" decrypt --quiet --password 'nope' "$WORK/Project.fcrypt" "$WORK/WrongFolder"
+check   "no partial folder was created" test ! -e "$WORK/WrongFolder"
+
+cp "$WORK/Project.fcrypt" "$WORK/Bad.fcrypt"
+python3 -c "
+import sys
+p = sys.argv[1]
+b = bytearray(open(p,'rb').read())
+b[-20] ^= 1
+open(p,'wb').write(bytes(b))
+" "$WORK/Bad.fcrypt"
+refuses "a tampered folder container is refused" "$BIN" decrypt --quiet --password 'folder pw' "$WORK/Bad.fcrypt" "$WORK/BadOut"
+check   "no partial folder from the tampered container" test ! -e "$WORK/BadOut"
+
+random_file "$WORK/single.bin" 1000
+"$BIN" encrypt --quiet --password pw "$WORK/single.bin" "$WORK/single.fcrypt" 2>/dev/null
+"$BIN" info "$WORK/single.fcrypt" 2>/dev/null | grep -q "single file" &&
+	ok "a file container is reported as a single file" || bad "a file container is reported as a single file"
+
+# ---------------------------------------------------------------------------
+echo
 echo "Password generator"
 # ---------------------------------------------------------------------------
 GENERATED=$("$BIN" generate --quiet 2>/dev/null)

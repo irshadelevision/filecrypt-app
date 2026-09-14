@@ -132,20 +132,143 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.destinationURL?.lastPathComponent, "payload.bin.decrypted")
     }
 
-    func testSelectingAFolderIsRefusedImmediatelyAndKeepsTheOldSelection() throws {
-        let folder = path("some-folder")
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let good = try makeFile("good.txt")
+    func testSelectingAFolderIsAcceptedForEncryption() throws {
+        let folder = path("project")
+        try FileManager.default.createDirectory(
+            at: folder.appendingPathComponent("src"), withIntermediateDirectories: true)
+        try Data("readme".utf8).write(to: folder.appendingPathComponent("README.md"))
+        try Data("code".utf8).write(to: folder.appendingPathComponent("src/main.swift"))
 
         let model = makeModel()
-        model.setInputFile(good)
-        XCTAssertEqual(model.inputURL, good)
-
         model.setInputFile(folder)
 
-        XCTAssertEqual(model.inputURL, good, "the previous selection must survive a rejected drop")
-        XCTAssertTrue(model.isShowingError)
-        XCTAssertEqual(model.errorMessage, "Folders cannot be processed. Choose a single file.")
+        XCTAssertTrue(model.inputIsDirectory)
+        XCTAssertEqual(model.mode, .encrypt)
+        XCTAssertEqual(model.inputURL, folder)
+        XCTAssertEqual(model.actionTitle, "Encrypt Folder")
+
+        // The container is a sibling, not `project.fcrypt` inside the folder.
+        XCTAssertEqual(model.destinationURL?.lastPathComponent, "project.fcrypt")
+        XCTAssertEqual(
+            model.destinationURL?.deletingLastPathComponent(),
+            folder.deletingLastPathComponent()
+        )
+
+        // The summary should describe the tree rather than claim a byte size.
+        XCTAssertTrue(model.inputDetail?.contains("2 files") == true, model.inputDetail ?? "nil")
+        XCTAssertTrue(model.inputDetail?.contains("2 folders") == true, model.inputDetail ?? "nil")
+    }
+
+    func testAFolderCannotBeSelectedForDecryption() throws {
+        let folder = path("not-a-container")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        let model = makeModel()
+        model.mode = .decrypt
+
+        // A folder is not a container, so decrypt validation must refuse it
+        // without the model silently switching modes.
+        model.setInputFile(folder)
+        XCTAssertTrue(model.inputIsDirectory)
+        XCTAssertFalse(model.inputLooksEncrypted)
+        XCTAssertNotNil(model.validationMessage)
+    }
+
+    func testFolderRoundTripThroughTheModel() async throws {
+        let folder = path("roundtrip-folder")
+        try FileManager.default.createDirectory(
+            at: folder.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        let payload = Data((0..<20_000).map { UInt8($0 % 251) })
+        try payload.write(to: folder.appendingPathComponent("nested/data.bin"))
+        try Data("notes".utf8).write(to: folder.appendingPathComponent("notes.txt"))
+
+        // --- encrypt ------------------------------------------------------
+        let encryptor = makeModel()
+        encryptor.setInputFile(folder)
+        encryptor.password = "folder passphrase"
+        encryptor.confirmPassword = "folder passphrase"
+        XCTAssertEqual(encryptor.actionTitle, "Encrypt Folder")
+        XCTAssertTrue(encryptor.canRun)
+
+        encryptor.primaryAction()
+        await waitForCompletion(encryptor)
+
+        XCTAssertFalse(encryptor.isShowingError, encryptor.errorMessage ?? "")
+        let container = try XCTUnwrap(encryptor.lastOutputURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: container.path))
+
+        // --- decrypt ------------------------------------------------------
+        let decryptor = makeModel()
+        decryptor.setInputFile(container)
+
+        XCTAssertEqual(decryptor.mode, .decrypt)
+        XCTAssertTrue(decryptor.containerHoldsDirectory)
+        XCTAssertEqual(decryptor.actionTitle, "Restore Folder")
+        // Restoring beside the container would collide with the original, so
+        // the default name is the container's own name without the extension.
+        XCTAssertEqual(decryptor.destinationURL?.lastPathComponent, "roundtrip-folder")
+
+        decryptor.password = "folder passphrase"
+        XCTAssertTrue(decryptor.canRun)
+        decryptor.primaryAction()
+
+        // `roundtrip-folder` still exists, so restoring over it must ask first
+        // rather than silently replacing the original.
+        XCTAssertTrue(
+            decryptor.isShowingOverwriteConfirmation,
+            "restoring onto an existing folder must ask before replacing it"
+        )
+        XCTAssertFalse(decryptor.isRunning)
+        decryptor.confirmOverwrite()
+        await waitForCompletion(decryptor)
+
+        XCTAssertFalse(decryptor.isShowingError, decryptor.errorMessage ?? "")
+        let restored = try XCTUnwrap(
+            decryptor.lastOutputURL,
+            "folder restore failed: \(decryptor.errorMessage ?? "no error")"
+        )
+
+        // The restored folder is the folder, not a folder containing it.
+        XCTAssertEqual(
+            try Data(contentsOf: restored.appendingPathComponent("nested/data.bin")),
+            payload
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: restored.appendingPathComponent("notes.txt")),
+            Data("notes".utf8)
+        )
+    }
+
+    func testWrongPasswordOnAFolderArchiveLeavesNothingBehind() async throws {
+        let folder = path("locked-folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("secret".utf8).write(to: folder.appendingPathComponent("s.txt"))
+
+        let encryptor = makeModel()
+        encryptor.setInputFile(folder)
+        encryptor.password = "right"
+        encryptor.confirmPassword = "right"
+        encryptor.primaryAction()
+        await waitForCompletion(encryptor)
+        let container = try XCTUnwrap(
+            encryptor.lastOutputURL,
+            "folder encryption failed: \(encryptor.errorMessage ?? "no error")"
+        )
+
+        let decryptor = makeModel()
+        decryptor.setInputFile(container)
+        decryptor.password = "wrong"
+        decryptor.primaryAction()
+        if decryptor.isShowingOverwriteConfirmation {
+            decryptor.confirmOverwrite()
+        }
+        await waitForCompletion(decryptor)
+
+        XCTAssertTrue(decryptor.isShowingError)
+        XCTAssertNil(decryptor.lastOutputURL)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: path("locked-folder.decrypted").path)
+        )
     }
 
     func testSelectingAMissingFileIsRefused() throws {
@@ -302,7 +425,10 @@ final class AppModelTests: XCTestCase {
         await waitForCompletion(decryptor)
 
         XCTAssertFalse(decryptor.isShowingError, decryptor.errorMessage ?? "")
-        let restored = try XCTUnwrap(decryptor.lastOutputURL)
+        let restored = try XCTUnwrap(
+            decryptor.lastOutputURL,
+            "folder restore failed: \(decryptor.errorMessage ?? "no error")"
+        )
         XCTAssertEqual(restored.lastPathComponent, "roundtrip.bin")
         XCTAssertEqual(try Data(contentsOf: restored), originalBytes)
     }

@@ -103,7 +103,7 @@ public enum KeyDerivationParameters: Equatable, Sendable {
 /// | 8      | 1    | format      | `2`                                    |
 /// | 9      | 1    | kdf         | `2` = Argon2id                         |
 /// | 10     | 1    | cipher      | `1` = AES-256-GCM                      |
-/// | 11     | 1    | flags       | `0`, reserved; unknown bits are fatal  |
+/// | 11     | 1    | flags       | bit 0 = directory archive; unknown bits are fatal |
 /// | 12     | 4    | chunk size  | plaintext bytes per record             |
 /// | 16     | 4    | memory      | Argon2id memory cost, KiB              |
 /// | 20     | 4    | time cost   | Argon2id passes                        |
@@ -133,6 +133,19 @@ public struct FileHeader: Equatable, Sendable {
     /// Cipher identifier for AES-256-GCM.
     public static let cipherIdentifier: UInt8 = 1
 
+    /// Bits that carry meaning in the `flags` byte.
+    ///
+    /// The byte exists precisely so that future payload kinds can be added
+    /// without a format break. A reader that does not know a bit must reject
+    /// the container rather than guess, which is why unknown bits stay fatal.
+    public enum Flag {
+        /// The plaintext is a `tar` archive of a directory rather than a single
+        /// file's bytes.
+        public static let directoryArchive: UInt8 = 0x01
+        /// Every bit this version understands.
+        public static let known: UInt8 = directoryArchive
+    }
+
     // Sanity bounds. A hostile file must not be able to make us allocate
     // gigabytes or spin for minutes before it fails authentication.
     public static let minimumChunkSize: UInt32 = 1_024
@@ -141,6 +154,11 @@ public struct FileHeader: Equatable, Sendable {
     public static let maximumPBKDF2Iterations: UInt32 = 20_000_000
 
     public var flags: UInt8
+
+    /// Does this container hold an archived folder?
+    public var containsDirectoryArchive: Bool {
+        flags & Flag.directoryArchive != 0
+    }
     public var chunkSize: UInt32
     public var salt: Data
     public var commitment: Data
@@ -241,7 +259,7 @@ public struct FileHeader: Equatable, Sendable {
         guard bytes[10] == cipherIdentifier else {
             throw CryptoError.unsupportedFormat(reason: "unknown cipher \(bytes[10]).")
         }
-        guard bytes[11] == 0 else {
+        guard bytes[11] & ~Flag.known == 0 else {
             throw CryptoError.unsupportedFormat(
                 reason: "unknown header flags (0x\(String(bytes[11], radix: 16)))."
             )
@@ -308,7 +326,13 @@ public struct FileHeader: Equatable, Sendable {
             chunkSize: chunkSize,
             salt: Data(bytes[saltOffset..<format.prefixSize]),
             commitment: Data(bytes[format.prefixSize..<expectedSize]),
-            keyDerivation: parameters
+            keyDerivation: parameters,
+            // The parsed flags must be carried through, not defaulted. Dropping
+            // them has two consequences, both bad: a container cannot be
+            // recognised as holding a folder, and editing the flags byte goes
+            // undetected because `encoded()` rebuilds the header with zeros and
+            // therefore reproduces the original commitment and AAD.
+            flags: bytes[11]
         )
     }
 }

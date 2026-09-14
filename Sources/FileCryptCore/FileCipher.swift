@@ -55,8 +55,37 @@ public enum FileCipher {
 
     /// Encrypt `inputURL` into `outputURL`.
     ///
-    /// The destination is written atomically; on any failure it is left
+    /// A directory is archived first; a regular file is streamed as-is. The
+    /// destination is written atomically, so on any failure it is left
     /// untouched.
+    @discardableResult
+    public static func encrypt(
+        at inputURL: URL,
+        to outputURL: URL,
+        password: String,
+        options: EncryptionOptions = EncryptionOptions(),
+        cancellation: CancellationFlag? = nil,
+        progress: ((Double) -> Void)? = nil,
+        phase: ((FileCipherPhase) -> Void)? = nil
+    ) throws -> URL {
+        try validatePaths(input: inputURL, output: outputURL, allowDirectoryInput: true)
+
+        var isDirectory: ObjCBool = false
+        FileManager.default.fileExists(atPath: inputURL.path, isDirectory: &isDirectory)
+
+        if isDirectory.boolValue {
+            return try encryptDirectory(
+                at: inputURL, to: outputURL, password: password, options: options,
+                cancellation: cancellation, progress: progress, phase: phase
+            )
+        }
+        return try encryptFile(
+            at: inputURL, to: outputURL, password: password, options: options,
+            cancellation: cancellation, progress: progress, phase: phase
+        )
+    }
+
+    /// Encrypt a single regular file.
     @discardableResult
     public static func encryptFile(
         at inputURL: URL,
@@ -69,14 +98,8 @@ public enum FileCipher {
     ) throws -> URL {
         let salt = try SecureData.randomBytes(count: FileHeader.saltSize)
         return try encryptFile(
-            at: inputURL,
-            to: outputURL,
-            password: password,
-            options: options,
-            salt: salt,
-            cancellation: cancellation,
-            progress: progress,
-            phase: phase
+            at: inputURL, to: outputURL, password: password, options: options,
+            salt: salt, cancellation: cancellation, progress: progress, phase: phase
         )
     }
 
@@ -97,15 +120,123 @@ public enum FileCipher {
         progress: ((Double) -> Void)? = nil,
         phase: ((FileCipherPhase) -> Void)? = nil
     ) throws -> URL {
-
-        try validatePaths(input: inputURL, output: outputURL)
+        try validatePaths(input: inputURL, output: outputURL, allowDirectoryInput: false)
         let chunkSize = try validate(options: options)
         let passwordData = try KeyDerivation.normalisedPassword(password)
-
         let inputSize = try regularFileSize(at: inputURL)
         let reporter = ProgressReporter(callback: progress, phaseCallback: phase)
 
-        // --- key schedule -------------------------------------------------
+        return try encryptContainer(
+            to: outputURL,
+            passwordData: passwordData,
+            options: options,
+            salt: salt,
+            chunkSize: chunkSize,
+            containsDirectoryArchive: false,
+            permissions: (try? FileManager.default
+                .attributesOfItem(atPath: inputURL.path)[.posixPermissions]) as? NSNumber,
+            totalSize: inputSize,
+            cancellation: cancellation,
+            reporter: reporter
+        ) { sink in
+            let source = try FileByteSource(url: inputURL)
+            defer { source.close() }
+
+            var processed: Int64 = 0
+            while true {
+                try checkCancellation(cancellation)
+                // Read *and* seal inside one pool: `FileHandle` and the
+                // AEAD both hand back autoreleased buffers, and without this
+                // the process grows with the file.
+                let chunk = try autoreleasepool { () -> Data in
+                    let data = try source.read(upTo: chunkSize)
+                    if !data.isEmpty { try sink.write(data) }
+                    return data
+                }
+                if chunk.isEmpty { break }
+                processed += Int64(chunk.count)
+                if inputSize > 0 {
+                    reporter.report(Double(processed) / Double(inputSize))
+                }
+            }
+        }
+    }
+
+    /// Encrypt a directory as a single container holding a `tar` archive.
+    @discardableResult
+    public static func encryptDirectory(
+        at inputURL: URL,
+        to outputURL: URL,
+        password: String,
+        options: EncryptionOptions = EncryptionOptions(),
+        cancellation: CancellationFlag? = nil,
+        progress: ((Double) -> Void)? = nil,
+        phase: ((FileCipherPhase) -> Void)? = nil
+    ) throws -> URL {
+        let salt = try SecureData.randomBytes(count: FileHeader.saltSize)
+        return try encryptDirectory(
+            at: inputURL, to: outputURL, password: password, options: options, salt: salt,
+            cancellation: cancellation, progress: progress, phase: phase
+        )
+    }
+
+    @discardableResult
+    static func encryptDirectory(
+        at inputURL: URL,
+        to outputURL: URL,
+        password: String,
+        options: EncryptionOptions,
+        salt: Data,
+        cancellation: CancellationFlag? = nil,
+        progress: ((Double) -> Void)? = nil,
+        phase: ((FileCipherPhase) -> Void)? = nil
+    ) throws -> URL {
+        try validatePaths(input: inputURL, output: outputURL, allowDirectoryInput: true)
+        let chunkSize = try validate(options: options)
+        let passwordData = try KeyDerivation.normalisedPassword(password)
+        let reporter = ProgressReporter(callback: progress, phaseCallback: phase)
+
+        // Walk first so progress has a denominator and so an unreadable file
+        // deep in the tree fails before anything is written.
+        let survey = try TarWriter.survey(root: inputURL)
+
+        return try encryptContainer(
+            to: outputURL,
+            passwordData: passwordData,
+            options: options,
+            salt: salt,
+            chunkSize: chunkSize,
+            containsDirectoryArchive: true,
+            // A folder has no single mode; each entry's mode is stored in the
+            // archive and restored on extraction instead.
+            permissions: nil,
+            totalSize: survey.totalBytes,
+            cancellation: cancellation,
+            reporter: reporter
+        ) { sink in
+            let writer = TarWriter(root: inputURL) { chunk in
+                try checkCancellation(cancellation)
+                try sink.write(chunk)
+            }
+            try writer.write(archiveRootName: inputURL.lastPathComponent)
+        }
+    }
+
+    /// Shared prologue: derive the key, build the header, and hand a sealing
+    /// sink to a closure that produces the plaintext.
+    private static func encryptContainer(
+        to outputURL: URL,
+        passwordData: Data,
+        options: EncryptionOptions,
+        salt: Data,
+        chunkSize: Int,
+        containsDirectoryArchive: Bool,
+        permissions: NSNumber?,
+        totalSize: Int64,
+        cancellation: CancellationFlag?,
+        reporter: ProgressReporter,
+        produce: (EncryptingByteSink) throws -> Void
+    ) throws -> URL {
         reporter.phase(.derivingKey)
         try checkCancellation(cancellation)
 
@@ -119,7 +250,8 @@ public enum FileCipher {
             chunkSize: UInt32(chunkSize),
             salt: salt,
             commitment: Data(),
-            keyDerivation: options.keyDerivation
+            keyDerivation: options.keyDerivation,
+            flags: containsDirectoryArchive ? FileHeader.Flag.directoryArchive : 0
         )
         header.commitment = KeyDerivation.commitment(for: header.prefixBytes(), key: keys.commitmentKey)
         let headerBytes = header.encoded()
@@ -127,83 +259,56 @@ public enum FileCipher {
         try checkCancellation(cancellation)
         reporter.phase(.processing)
 
-        // --- stream -------------------------------------------------------
         let transaction = try OutputTransaction(destination: outputURL)
         var committed = false
         defer { if !committed { transaction.cleanup() } }
 
         try transaction.write(headerBytes)
 
-        guard let inputHandle = FileHandle(forReadingAtPath: inputURL.path) else {
-            throw CryptoError.ioError("Could not open \"\(inputURL.lastPathComponent)\" for reading.")
-        }
-        defer { try? inputHandle.close() }
+        let sink = EncryptingByteSink(
+            headerBytes: headerBytes,
+            key: keys.encryptionKey,
+            chunkSize: chunkSize,
+            output: transaction
+        )
+        try produce(sink)
+        try sink.finish()
 
-        var index: UInt64 = 0
-        var processed: Int64 = 0
-        var current = try readUpTo(from: inputHandle, maximum: chunkSize)
-
-        if current.isEmpty {
-            // Zero-byte input still produces one authenticated (empty) record,
-            // so "empty file" round-trips instead of looking like a truncation.
-            try autoreleasepool {
-                try seal(
-                    plaintext: Data(),
-                    index: 0,
-                    isFinal: true,
-                    headerBytes: headerBytes,
-                    key: keys.encryptionKey,
-                    transaction: transaction
-                )
-            }
-        } else {
-            while true {
-                try checkCancellation(cancellation)
-
-                // A record's whole lifetime sits inside one pool. `FileHandle`
-                // hands back autoreleased buffers, and without draining them
-                // here the process grows to roughly the size of the file it is
-                // encrypting.
-                let chunkToSeal = current
-                let next = try autoreleasepool { () throws -> Data in
-                    let following = try readUpTo(from: inputHandle, maximum: chunkSize)
-                    try seal(
-                        plaintext: chunkToSeal,
-                        index: index,
-                        isFinal: following.isEmpty,
-                        headerBytes: headerBytes,
-                        key: keys.encryptionKey,
-                        transaction: transaction
-                    )
-                    return following
-                }
-
-                processed += Int64(chunkToSeal.count)
-                if inputSize > 0 {
-                    reporter.report(Double(processed) / Double(inputSize))
-                }
-
-                if next.isEmpty { break }
-                current = next
-                index += 1
-            }
-        }
-
-        // --- finalise -----------------------------------------------------
         reporter.phase(.finalizing)
         try checkCancellation(cancellation)
-
-        let permissions = (try? FileManager.default
-            .attributesOfItem(atPath: inputURL.path)[.posixPermissions]) as? NSNumber
 
         try transaction.commit(permissions: permissions)
         committed = true
         reporter.report(1.0, force: true)
-
+        _ = totalSize
         return outputURL
     }
 
-    /// Decrypt `inputURL` into `outputURL`.
+    /// Decrypt a container, writing a file or extracting a folder depending on
+    /// what the header says it holds.
+    @discardableResult
+    public static func decrypt(
+        at inputURL: URL,
+        to outputURL: URL,
+        password: String,
+        cancellation: CancellationFlag? = nil,
+        progress: ((Double) -> Void)? = nil,
+        phase: ((FileCipherPhase) -> Void)? = nil
+    ) throws -> URL {
+        let header = try readHeader(at: inputURL)
+        if header.containsDirectoryArchive {
+            return try decryptDirectory(
+                at: inputURL, to: outputURL, password: password,
+                cancellation: cancellation, progress: progress, phase: phase
+            )
+        }
+        return try decryptFile(
+            at: inputURL, to: outputURL, password: password,
+            cancellation: cancellation, progress: progress, phase: phase
+        )
+    }
+
+    /// Decrypt a container that holds a single file's bytes.
     @discardableResult
     public static func decryptFile(
         at inputURL: URL,
@@ -213,12 +318,122 @@ public enum FileCipher {
         progress: ((Double) -> Void)? = nil,
         phase: ((FileCipherPhase) -> Void)? = nil
     ) throws -> URL {
+        try validatePaths(input: inputURL, output: outputURL, allowDirectoryInput: false)
 
-        try validatePaths(input: inputURL, output: outputURL)
+        let transaction = try OutputTransaction(destination: outputURL)
+        var committed = false
+        defer { if !committed { transaction.cleanup() } }
+
+        try openContainer(
+            at: inputURL, password: password, cancellation: cancellation,
+            progress: progress, phase: phase
+        ) { plaintext, reporter, totalSize in
+            while true {
+                try checkCancellation(cancellation)
+                let chunk = try autoreleasepool { () -> Data in
+                    let data = try plaintext.read(upTo: 1 << 20)
+                    if !data.isEmpty { try transaction.write(data) }
+                    return data
+                }
+                if chunk.isEmpty { break }
+                reporter.report(Double(plaintext.bytesConsumed) / Double(max(totalSize, 1)))
+            }
+            // A stream that merely stops being read cannot tell "finished"
+            // from "truncated"; this is what distinguishes them.
+            try plaintext.verifyComplete()
+        }
+
+        // The container's mode is not the plaintext's; the caller restores the
+        // original permissions itself when it knows them.
+        try transaction.commit(permissions: nil)
+        progress?(1.0)
+        committed = true
+        return outputURL
+    }
+
+    /// Decrypt a container that holds an archived folder, extracting it to
+    /// `outputURL`.
+    @discardableResult
+    public static func decryptDirectory(
+        at inputURL: URL,
+        to outputURL: URL,
+        password: String,
+        cancellation: CancellationFlag? = nil,
+        progress: ((Double) -> Void)? = nil,
+        phase: ((FileCipherPhase) -> Void)? = nil
+    ) throws -> URL {
+        try validatePaths(
+            input: inputURL, output: outputURL,
+            allowDirectoryInput: false, allowDirectoryOutput: true
+        )
+
+        // Extract into a sibling staging directory and move it into place only
+        // once the whole archive has authenticated, so a tampered container
+        // cannot leave a half-populated folder behind.
+        let parent = outputURL.deletingLastPathComponent()
+        let staging = parent.appendingPathComponent(
+            ".\(outputURL.lastPathComponent).fcrypt-\(UUID().uuidString).partial"
+        )
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        var committed = false
+        defer { if !committed { try? FileManager.default.removeItem(at: staging) } }
+
+        try openContainer(
+            at: inputURL, password: password, cancellation: cancellation,
+            progress: progress, phase: phase
+        ) { plaintext, reporter, totalSize in
+            let reader = TarReader { try autoreleasepool { try plaintext.read(upTo: 1 << 20) } }
+            _ = try TarExtractor.extract(reader: reader, to: staging) { _ in
+                reporter.report(Double(plaintext.bytesConsumed) / Double(max(totalSize, 1)))
+            }
+            try plaintext.verifyComplete()
+        }
+
+        // The caller names the folder, so the archive's own top-level entry is
+        // unwrapped rather than nested inside it: decrypting `Project.fcrypt`
+        // to `Restored` should give `Restored/README.md`, not
+        // `Restored/Project/README.md`. That matches how the output path is
+        // treated for a single file.
+        var source = staging
+        let contents = try FileManager.default.contentsOfDirectory(atPath: staging.path)
+        if contents.count == 1 {
+            let only = staging.appendingPathComponent(contents[0])
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: only.path, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                source = only
+            }
+        }
+
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+        do {
+            try FileManager.default.moveItem(at: source, to: outputURL)
+        } catch {
+            throw CryptoError.ioError(
+                "Could not move the extracted folder into place: \(error.localizedDescription)"
+            )
+        }
+        committed = true
+        progress?(1.0)
+        return outputURL
+    }
+
+    /// Shared prologue for both decryption paths: read the header, derive the
+    /// key, verify the commitment, and hand a plaintext source to a closure.
+    private static func openContainer(
+        at inputURL: URL,
+        password: String,
+        cancellation: CancellationFlag?,
+        progress: ((Double) -> Void)?,
+        phase: ((FileCipherPhase) -> Void)?,
+        consume: (DecryptingByteSource, ProgressReporter, Int64) throws -> Void
+    ) throws {
         let passwordData = try KeyDerivation.normalisedPassword(password)
         let totalSize = try regularFileSize(at: inputURL)
+        let reporter = ProgressReporter(callback: progress, phaseCallback: phase)
 
-        // The smallest header any supported format can have.
         let smallestHeader = ContainerFormat.allCases.map(\.encodedSize).min() ?? 88
         guard totalSize >= UInt64(smallestHeader) else {
             throw CryptoError.corruptedFile(
@@ -226,41 +441,28 @@ public enum FileCipher {
             )
         }
 
-        let reporter = ProgressReporter(callback: progress, phaseCallback: phase)
+        let source = try FileByteSource(url: inputURL)
+        defer { source.close() }
 
-        guard let inputHandle = FileHandle(forReadingAtPath: inputURL.path) else {
-            throw CryptoError.ioError("Could not open \"\(inputURL.lastPathComponent)\" for reading.")
-        }
-        defer { try? inputHandle.close() }
-
-        // --- header -------------------------------------------------------
-        // The magic decides the layout, so read it first and then read exactly
-        // as many more bytes as that format uses.
-        let magic = try readExactly(from: inputHandle, count: 8)
+        let magic = try readExactly(from: source, count: 8)
         guard let format = ContainerFormat.forMagic([UInt8](magic)) else {
             throw CryptoError.notEncryptedFile
         }
-        guard totalSize >= UInt64(format.encodedSize) else {
-            throw CryptoError.truncatedFile
-        }
+        guard totalSize >= UInt64(format.encodedSize) else { throw CryptoError.truncatedFile }
+
         var headerData = magic
-        headerData.append(try readExactly(from: inputHandle, count: format.encodedSize - 8))
+        headerData.append(try readExactly(from: source, count: format.encodedSize - 8))
         let header = try FileHeader.decode(headerData)
 
-        // --- key schedule / password check --------------------------------
         reporter.phase(.derivingKey)
         try checkCancellation(cancellation)
 
         let keys = try KeyDerivation.deriveKeys(
-            password: passwordData,
-            salt: header.salt,
-            parameters: header.keyDerivation
+            password: passwordData, salt: header.salt, parameters: header.keyDerivation
         )
 
         guard KeyDerivation.isValidCommitment(
-            header.commitment,
-            prefix: header.prefixBytes(),
-            key: keys.commitmentKey
+            header.commitment, prefix: header.prefixBytes(), key: keys.commitmentKey
         ) else {
             // Detected with one constant-time HMAC, before touching ciphertext.
             throw CryptoError.wrongPassword
@@ -268,95 +470,14 @@ public enum FileCipher {
 
         reporter.phase(.processing)
 
-        // --- stream -------------------------------------------------------
-        let transaction = try OutputTransaction(destination: outputURL)
-        var committed = false
-        defer { if !committed { transaction.cleanup() } }
-
-        let chunkSize = Int(header.chunkSize)
-        let headerBytes = header.encoded()
-        let maximumRecordSize = UInt32(chunkSize) + UInt32(FileHeader.tagSize)
-
-        var consumed = UInt64(header.encodedSize)
-        var index: UInt64 = 0
-        var sawFinalRecord = false
-
-        while consumed < totalSize {
-            try checkCancellation(cancellation)
-
-            // See the note in `encryptFile`: one pool per record keeps memory
-            // flat regardless of how large the container is.
-            let isFinal = try autoreleasepool { () throws -> Bool in
-                let lengthBytes = try readExactly(from: inputHandle, count: 4)
-                consumed += 4
-                let cipherLength = ByteCoding.readUInt32LE([UInt8](lengthBytes), at: 0)
-
-                guard cipherLength >= UInt32(FileHeader.tagSize) else {
-                    throw CryptoError.corruptedFile(
-                        reason: "Record \(index) is shorter than its own authentication tag."
-                    )
-                }
-                guard cipherLength <= maximumRecordSize else {
-                    throw CryptoError.corruptedFile(
-                        reason: "Record \(index) claims \(cipherLength) bytes, more than the header's chunk size allows."
-                    )
-                }
-                guard consumed + UInt64(cipherLength) <= totalSize else {
-                    throw CryptoError.truncatedFile
-                }
-
-                let record = try readExactly(from: inputHandle, count: Int(cipherLength))
-                consumed += UInt64(cipherLength)
-                let isFinal = consumed >= totalSize
-
-                let nonce = try makeNonce(index: index)
-                let aad = makeAdditionalAuthenticatedData(
-                    headerBytes: headerBytes,
-                    index: index,
-                    isFinal: isFinal,
-                    cipherLength: cipherLength
-                )
-
-                let ciphertext = record.prefix(record.count - FileHeader.tagSize)
-                let tag = record.suffix(FileHeader.tagSize)
-
-                let plaintext: Data
-                do {
-                    let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertext, tag: tag)
-                    plaintext = try AES.GCM.open(box, using: keys.encryptionKey, authenticating: aad)
-                } catch {
-                    throw CryptoError.corruptedFile(
-                        reason: "Block \(index + 1) failed authentication. The file was modified, truncated, or is not intact."
-                    )
-                }
-
-                try transaction.write(plaintext)
-                return isFinal
-            }
-
-            reporter.report(Double(consumed) / Double(totalSize))
-
-            if isFinal {
-                sawFinalRecord = true
-                break
-            }
-            index += 1
-        }
-
-        guard sawFinalRecord else {
-            throw CryptoError.truncatedFile
-        }
-
-        // --- finalise -----------------------------------------------------
-        reporter.phase(.finalizing)
-        let permissions = (try? FileManager.default
-            .attributesOfItem(atPath: inputURL.path)[.posixPermissions]) as? NSNumber
-
-        try transaction.commit(permissions: permissions)
-        committed = true
-        reporter.report(1.0, force: true)
-
-        return outputURL
+        let plaintext = DecryptingByteSource(
+            source: source,
+            header: header,
+            key: keys.encryptionKey,
+            headerSize: header.encodedSize,
+            totalSize: totalSize
+        )
+        try consume(plaintext, reporter, totalSize)
     }
 
     // MARK: - Inspection
@@ -364,33 +485,34 @@ public enum FileCipher {
     /// Read and validate just the header. Cheap; used by the UI and the CLI.
     public static func readHeader(at url: URL) throws -> FileHeader {
         let size = try regularFileSize(at: url)
-        guard size >= 8 else {
-            throw CryptoError.notEncryptedFile
-        }
-        guard let handle = FileHandle(forReadingAtPath: url.path) else {
-            throw CryptoError.ioError("Could not open \"\(url.lastPathComponent)\" for reading.")
-        }
-        defer { try? handle.close() }
+        guard size >= 8 else { throw CryptoError.notEncryptedFile }
 
-        let magic = try readExactly(from: handle, count: 8)
+        let source = try FileByteSource(url: url)
+        defer { source.close() }
+
+        let magic = try readExactly(from: source, count: 8)
         guard let format = ContainerFormat.forMagic([UInt8](magic)) else {
             throw CryptoError.notEncryptedFile
         }
-        guard size >= UInt64(format.encodedSize) else {
-            throw CryptoError.truncatedFile
-        }
+        guard size >= UInt64(format.encodedSize) else { throw CryptoError.truncatedFile }
 
         var data = magic
-        data.append(try readExactly(from: handle, count: format.encodedSize - 8))
+        data.append(try readExactly(from: source, count: format.encodedSize - 8))
         return try FileHeader.decode(data)
     }
 
     /// Does this file start with a FileCrypt magic?
     public static func looksEncrypted(_ url: URL) -> Bool {
-        guard let handle = FileHandle(forReadingAtPath: url.path) else { return false }
-        defer { try? handle.close() }
-        guard let prefix = try? handle.read(upToCount: 8), prefix.count == 8 else { return false }
+        let source = try? FileByteSource(url: url)
+        guard let source else { return false }
+        defer { source.close() }
+        guard let prefix = try? source.read(upTo: 8), prefix.count == 8 else { return false }
         return FileHeader.isFileCryptMagic([UInt8](prefix))
+    }
+
+    /// Is this container an archived folder?
+    public static func containsDirectory(_ url: URL) -> Bool {
+        (try? readHeader(at: url))?.containsDirectoryArchive ?? false
     }
 
     // MARK: - Record sealing
@@ -455,7 +577,12 @@ public enum FileCipher {
 
     // MARK: - Validation
 
-    private static func validatePaths(input: URL, output: URL) throws {
+    private static func validatePaths(
+        input: URL,
+        output: URL,
+        allowDirectoryInput: Bool,
+        allowDirectoryOutput: Bool = false
+    ) throws {
         let inputPath = input.standardizedFileURL.resolvingSymlinksInPath().path
         let outputPath = output.standardizedFileURL.resolvingSymlinksInPath().path
         guard inputPath != outputPath else {
@@ -466,8 +593,8 @@ public enum FileCipher {
         guard FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectory) else {
             throw CryptoError.ioError("The file \"\(input.lastPathComponent)\" no longer exists.")
         }
-        guard !isDirectory.boolValue else {
-            throw CryptoError.ioError("Folders cannot be encrypted. Choose a single file.")
+        if isDirectory.boolValue, !allowDirectoryInput {
+            throw CryptoError.ioError("That is a folder. Use the folder action to encrypt it.")
         }
 
         let directory = output.deletingLastPathComponent()
@@ -486,10 +613,16 @@ public enum FileCipher {
         //
         // `fileExists` follows symlinks, so this also rejects a symlink that
         // points at a directory.
-        var outputIsDirectory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: output.path, isDirectory: &outputIsDirectory),
-           outputIsDirectory.boolValue {
-            throw CryptoError.destinationIsDirectory(name: output.lastPathComponent)
+        //
+        // Only when the result is meant to be a file, though: restoring a
+        // folder archive into an existing folder is the ordinary overwrite
+        // case, not a mistake.
+        if !allowDirectoryOutput {
+            var outputIsDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: output.path, isDirectory: &outputIsDirectory),
+               outputIsDirectory.boolValue {
+                throw CryptoError.destinationIsDirectory(name: output.lastPathComponent)
+            }
         }
     }
 
@@ -565,20 +698,14 @@ public enum FileCipher {
         return result
     }
 
-    /// Read exactly `count` bytes or fail with `.truncatedFile`.
-    private static func readExactly(from handle: FileHandle, count: Int) throws -> Data {
+    /// Read exactly `count` bytes from a source, or fail with `.truncatedFile`.
+    static func readExactly(from source: ByteSource, count: Int) throws -> Data {
         guard count > 0 else { return Data() }
         var result = Data()
         result.reserveCapacity(count)
         while result.count < count {
-            let remaining = count - result.count
-            let piece: Data?
-            do {
-                piece = try handle.read(upToCount: remaining)
-            } catch {
-                throw CryptoError.ioError("Could not read the input file: \(error.localizedDescription)")
-            }
-            guard let piece, !piece.isEmpty else { throw CryptoError.truncatedFile }
+            let piece = try source.read(upTo: count - result.count)
+            guard !piece.isEmpty else { throw CryptoError.truncatedFile }
             result.append(piece)
         }
         return result

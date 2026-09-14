@@ -95,7 +95,7 @@ struct ContentView: View {
     // MARK: - Step 1: file
 
     private var fileCard: some View {
-        StepCard(number: 1, title: model.mode == .encrypt ? "Choose a file" : "Choose a container") {
+        StepCard(number: 1, title: model.mode == .encrypt ? "Choose a file or folder" : "Choose a container") {
             VStack(spacing: 10) {
                 dropZone
                 if model.inputURL != nil {
@@ -136,7 +136,9 @@ struct ContentView: View {
 
     private func chosenFile(_ url: URL) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: model.inputLooksEncrypted ? "lock.doc.fill" : "doc.fill")
+            Image(systemName: model.inputLooksEncrypted
+                  ? "lock.doc.fill"
+                  : (model.inputIsDirectory ? "folder.fill" : "doc.fill"))
                 .font(.system(size: 20))
                 .foregroundStyle(Theme.accent)
                 .frame(width: 24)
@@ -165,9 +167,9 @@ struct ContentView: View {
             Image(systemName: "arrow.down.doc")
                 .font(.system(size: 24, weight: .light))
                 .foregroundStyle(Theme.accent)
-            Text("Drag a file here")
+            Text(encrypting ? "Drag a file or folder here" : "Drag a .fcrypt file here")
                 .font(Theme.Text.bodyMedium)
-            Button("Choose File…") { model.chooseInputFile() }
+            Button(encrypting ? "Choose File or Folder…" : "Choose File…") { model.chooseInputFile() }
                 .controlSize(.small)
         }
         .padding(.vertical, 14)
@@ -186,11 +188,16 @@ struct ContentView: View {
                 Button {
                     model.chooseDestination()
                 } label: {
-                    Label(destination.lastPathComponent, systemImage: "folder")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    Label(
+                        destination.lastPathComponent,
+                        systemImage: model.destinationHoldsFolder ? "folder.badge.plus" : "doc.badge.plus"
+                    )
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 }
-                .help("Save as \(destination.path)")
+                .help(model.destinationHoldsFolder
+                      ? "Restore into \(destination.path)"
+                      : "Save as \(destination.path)")
                 .disabled(model.isRunning)
             }
         }
@@ -443,7 +450,7 @@ struct ContentView: View {
                         .keyboardShortcut(.cancelAction)
                     Spacer()
                 } else {
-                    Button(model.mode.actionTitle) { model.primaryAction() }
+                    Button(model.actionTitle) { model.primaryAction() }
                         .controlSize(.large)
                         .buttonStyle(PrimaryButtonStyle())
                         .keyboardShortcut(.defaultAction)

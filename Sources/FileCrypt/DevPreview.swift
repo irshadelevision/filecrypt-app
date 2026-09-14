@@ -74,6 +74,18 @@ enum DevPreview {
         success.mode = .decrypt
         render(model: success, to: directory.appendingPathComponent("quiescent.png"))
 
+        // A folder selected for encryption.
+        let folder = directory.appendingPathComponent("Design Assets")
+        try? FileManager.default.createDirectory(
+            at: folder.appendingPathComponent("icons"), withIntermediateDirectories: true)
+        try? Data(repeating: 0x41, count: 120_000).write(to: folder.appendingPathComponent("logo.png"))
+        try? Data(repeating: 0x42, count: 40_000).write(to: folder.appendingPathComponent("icons/app.png"))
+        try? Data("notes".utf8).write(to: folder.appendingPathComponent("notes.txt"))
+
+        let folderModel = makeModel(file: nil, password: "", confirm: "")
+        folderModel.setInputFile(folder)
+        render(model: folderModel, to: directory.appendingPathComponent("encrypt-folder.png"))
+
         // The state right after pressing Generate: revealed password, the
         // "save it now" banner, and the Copy button.
         let generated = makeModel(file: scratch, password: "", confirm: "")
@@ -82,6 +94,7 @@ enum DevPreview {
 
         try? FileManager.default.removeItem(at: scratch)
         try? FileManager.default.removeItem(at: encryptedFixture)
+        try? FileManager.default.removeItem(at: folder)
 
         FileHandle.standardError.write(Data("rendered previews into \(directory.path)\n".utf8))
         exit(0)

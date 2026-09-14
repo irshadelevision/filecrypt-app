@@ -1,10 +1,11 @@
 # FileCrypt
 
-A native macOS app that encrypts a single file with **AES-256-GCM**, keyed from a
-password through a memory-hard **Argon2id → HKDF-SHA256** chain.
+A native macOS app that encrypts a **file or a whole folder** with
+**AES-256-GCM**, keyed from a password through a memory-hard
+**Argon2id → HKDF-SHA256** chain.
 
-Pick a file, type or generate a password, get a `.fcrypt` container. Pick the
-container, enter the same password, get the file back.
+Pick a file or folder, type or generate a password, get a single `.fcrypt`
+container. Pick the container, enter the same password, get it back.
 
 No account, no network, no keychain, no telemetry, no recovery. The password is
 the only thing that can open the file, and it never leaves the Mac.
@@ -74,14 +75,19 @@ binary art assets in the repository.
 
 The window is a three-step form.
 
-### 1 · Choose a file
+### 1 · Choose a file or folder
 
-Drag a file onto the drop zone, or press **Choose File…**. The app reads the
-first eight bytes and switches itself to **Encrypt** or **Decrypt** depending on
-what it finds, so you rarely have to touch the mode switch.
+Drag a file or folder onto the drop zone, or press **Choose File or Folder…**.
+The app reads the first eight bytes and switches itself to **Encrypt** or
+**Decrypt** depending on what it finds, so you rarely have to touch the mode
+switch.
 
-- Dropping a **folder** is refused immediately, with an explanation, rather than
-  letting you get as far as typing a password.
+- **A folder is archived** into a single container, preserving its structure,
+  file permissions and symlinks. Encrypting `~/Design Assets` produces
+  `Design Assets.fcrypt` beside it — not inside it.
+- Restoring names the folder: decrypting `Design Assets.fcrypt` to `Assets`
+  gives `Assets/`, with the archive's own top-level entry unwrapped rather than
+  nested inside.
 - The destination is shown next to the **Change…** button and defaults to the
   original path with `.fcrypt` appended (`report.pdf` → `report.pdf.fcrypt`).
   Decrypting strips `.fcrypt`, or appends `.decrypted` if the container did not
@@ -224,6 +230,10 @@ fcrypt selftest
 # Prompt for the password on the terminal, with echo off.
 fcrypt encrypt report.pdf report.pdf.fcrypt
 fcrypt decrypt report.pdf.fcrypt report.pdf
+
+# Folders work the same way; the tool detects which it was given.
+fcrypt encrypt ~/Projects/site ~/site.fcrypt
+fcrypt decrypt ~/site.fcrypt ~/site-restored
 
 # Non-interactive password sources.
 fcrypt encrypt --password-env FILE_PASSWORD in.bin out.fcrypt
@@ -368,6 +378,9 @@ AAD   for record i = full header ‖ uint64be(i) ‖ isFinal ‖ uint32le(length
 
 That one construction makes the container tamper-evident in every direction:
 
+A folder is stored as a POSIX `tar` archive inside the same container the file
+path uses, so it inherits every one of the properties below unchanged.
+
 | Attack | Why it fails |
 |--------|--------------|
 | Reorder records | Record 5 authenticates itself as record 5 |
@@ -381,6 +394,15 @@ Nonce reuse — the one thing that would be fatal for GCM — is impossible by
 construction: the AES key derives from a fresh 32-byte CSPRNG salt on every
 encryption, so any given key only ever seals one file's records, each with a
 distinct index.
+
+### Folder archives
+
+The header's `flags` byte carries one bit meaning "this payload is an archive of
+a folder". A reader that does not know the bit rejects the container rather than
+guessing, which is what the byte is reserved for. Extraction is the dangerous
+direction, so every entry path is checked before it reaches the filesystem: no
+absolute paths, no `..` components, and nothing written through a symlink an
+earlier entry created.
 
 ### Backwards compatibility
 
@@ -462,8 +484,8 @@ Everything above is tested, but two things are worth being explicit about:
 ## Testing
 
 ```bash
-swift test                # 114 tests
-./Scripts/smoke.sh        # 83 black-box checks
+swift test                # 143 tests
+./Scripts/smoke.sh        # 95 black-box checks
 ./Scripts/largefile_check.sh --size 16G
 ```
 
@@ -480,10 +502,12 @@ permitted`, you are already inside a sandbox that forbids nested sandboxing. Add
 | `FileCipherRoundTripTests` | 12 | Sizes straddling the chunk boundary, empty files, Unicode passwords, deterministic container layout |
 | `FileCipherIntegrityTests` | 29 | Truncation at eight offsets, record reordering and replay, bit flips in *every* header byte, cancellation, permissions, temporary-file cleanup |
 | `ByteCodingTests` | 6 | Exact byte order of the framing helpers |
+| `TarTests` | 15 | Archive round trips, long paths, and interoperability with the system `tar` in both directions |
+| `DirectoryCipherTests` | 11 | Folder round trips, permissions, symlinks, tamper and truncation handling |
 | `InteropTests` | 9 | A golden container per format, produced by an independent implementation |
 | `MemoryFootprintTests` | 2 | Memory does not scale with file size (4 MiB vs 48 MiB) — see the note below |
 | `PasswordGeneratorTests` | 16 | Length, pool membership, class guarantees, look-alike exclusion, chi-square uniformity, entropy |
-| `AppModelTests` | 22 | Mode switching, destination naming, validation, overwrite prompt, cancel, full round trip through the model |
+| `AppModelTests` | 25 | Mode switching, destination naming, validation, overwrite prompt, cancel, full round trip through the model |
 
 ### Interoperability
 
@@ -534,7 +558,7 @@ cause; twelve consecutive full runs are clean.
 ./Scripts/smoke.sh
 ```
 
-83 black-box checks against the real binary: round trips at seven sizes, every
+95 black-box checks against the real binary: file and folder round trips, every
 password source, password generation, the error paths (wrong password, missing
 input, input equal to output, unparseable options), ten different tamperings of a
 real container, and interoperability in both directions.
@@ -602,7 +626,12 @@ accurate for layout, content and state but not for accent colour.
 
 ```
 Sources/FileCryptCore/          the engine — no UI, fully unit-tested
-  FileCipher.swift                streaming encrypt/decrypt
+  FileCipher.swift                streaming encrypt/decrypt, file and folder
+  RecordStream.swift              the record framing, shared by both
+  ByteStream.swift                byte source/sink abstraction
+  Tar.swift                       ustar header and PAX primitives
+  TarWriter.swift                 walks a folder into a tar stream
+  TarReader.swift                 reads a tar stream; extraction path safety
   FileHeader.swift                container header, parse + validate
   KeyDerivation.swift             Argon2id/PBKDF2 → HKDF key schedule
   Argon2.swift                    Swift wrapper over the vendored reference Argon2
@@ -626,8 +655,8 @@ Sources/FileCrypt/              the SwiftUI app
 
 Sources/CArgon2/                vendored phc-winner-argon2, see NOTICE.md
 Sources/fcrypt/                 the command-line tool
-Tests/FileCryptCoreTests/       91 tests (engine)
-Tests/FileCryptAppTests/        22 tests (app behaviour)
+Tests/FileCryptCoreTests/      118 tests (engine)
+Tests/FileCryptAppTests/        25 tests (app behaviour)
 Scripts/smoke.sh                black-box end-to-end suite
 Scripts/largefile_check.sh      large-file round trip
 Scripts/counter_pattern.py      offset-encoding generator/verifier

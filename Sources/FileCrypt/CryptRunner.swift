@@ -78,7 +78,7 @@ enum CryptRunner {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    let url = try FileCipher.encryptFile(
+                    let url = try FileCipher.encrypt(
                         at: input,
                         to: output,
                         password: password,
@@ -106,7 +106,7 @@ enum CryptRunner {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    let url = try FileCipher.decryptFile(
+                    let url = try FileCipher.decrypt(
                         at: input,
                         to: output,
                         password: password,

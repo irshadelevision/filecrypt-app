@@ -292,13 +292,21 @@ func runTransform(mode: String, args: Arguments) -> Int32 {
     let quiet = args.has("quiet")
     let printer = ProgressPrinter(enabled: !quiet)
 
+    var isDirectoryInput: ObjCBool = false
+    FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectoryInput)
+    if isEncrypt, isDirectoryInput.boolValue, !quiet {
+        writeInfo("  archiving folder \(input.lastPathComponent)")
+    }
+
     let progress: (Double) -> Void = { value in
         printer.update(value, phase: .processing)
     }
 
     do {
         if isEncrypt {
-            try FileCipher.encryptFile(
+            // `encrypt` archives a directory and streams a file; the caller does
+            // not have to know which it picked.
+            try FileCipher.encrypt(
                 at: input,
                 to: output,
                 password: password,
@@ -311,7 +319,7 @@ func runTransform(mode: String, args: Arguments) -> Int32 {
                 progress: progress
             )
         } else {
-            try FileCipher.decryptFile(
+            try FileCipher.decrypt(
                 at: input,
                 to: output,
                 password: password,
@@ -382,6 +390,7 @@ func runInfo(args: Arguments) -> Int32 {
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         print("file:            \(url.path)")
         print("container:       FileCrypt format \(header.format.rawValue)")
+        print("contents:        \(header.containsDirectoryArchive ? "folder (tar archive)" : "single file")")
         print("cipher:          AES-256-GCM (chunked, per-record AAD binding)")
         print("key derivation:  \(header.keyDerivation.summary) -> HKDF-SHA256")
         if header.format == .pbkdf2SHA512 {

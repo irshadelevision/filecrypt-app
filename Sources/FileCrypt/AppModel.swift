@@ -68,6 +68,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var inputDetail: String?
     /// `true` when the selected file starts with the FileCrypt magic.
     @Published private(set) var inputLooksEncrypted = false
+    /// `true` when the selection is a folder rather than a file.
+    @Published private(set) var inputIsDirectory = false
+    /// `true` when the selected container holds an archived folder.
+    @Published private(set) var containerHoldsDirectory = false
 
     @Published var password = "" {
         didSet {
@@ -132,6 +136,19 @@ final class AppModel: ObservableObject {
 
     // MARK: - Derived state
 
+    /// `true` when this run will produce a folder rather than a file.
+    var destinationHoldsFolder: Bool {
+        (mode == .encrypt && inputIsDirectory) || (mode == .decrypt && containerHoldsDirectory)
+    }
+
+    /// Labels the primary button for what is actually about to happen.
+    var actionTitle: String {
+        switch mode {
+        case .encrypt: return inputIsDirectory ? "Encrypt Folder" : "Encrypt File"
+        case .decrypt: return containerHoldsDirectory ? "Restore Folder" : "Decrypt File"
+        }
+    }
+
     var canRun: Bool {
         !isRunning && inputURL != nil && !password.isEmpty && validationMessage == nil
     }
@@ -180,22 +197,22 @@ final class AppModel: ObservableObject {
         // letting the user pick a folder, type a password and only then be told
         // it was never going to work. Dropping a folder on the drop zone is an
         // easy mistake to make.
-        guard let values = try? standardised.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]) else {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: standardised.path, isDirectory: &isDirectory) else {
             present(error: "Could not read “\(standardised.lastPathComponent)”. Check that you can open it.")
-            return
-        }
-        guard values.isRegularFile == true else {
-            present(error: "Folders cannot be processed. Choose a single file.")
             return
         }
 
         inputURL = standardised
+        inputIsDirectory = isDirectory.boolValue
         successMessage = nil
         errorMessage = nil
         lastOutputURL = nil
 
-        let detected = FileCipher.looksEncrypted(standardised)
+        // A folder is never a container; only files carry a magic.
+        let detected = inputIsDirectory ? false : FileCipher.looksEncrypted(standardised)
         inputLooksEncrypted = detected
+        containerHoldsDirectory = detected ? FileCipher.containsDirectory(standardised) : false
 
         // Follow the file: a .fcrypt container means the user wants to decrypt.
         if detected, mode == .encrypt {
@@ -204,7 +221,9 @@ final class AppModel: ObservableObject {
             mode = .encrypt
         }
 
-        inputDetail = describe(standardised, size: values.fileSize ?? 0)
+        inputDetail = inputIsDirectory
+            ? folderSummary(standardised)
+            : describe(standardised, size: fileSize(of: standardised))
         refreshDestination()
     }
 
@@ -214,8 +233,24 @@ final class AppModel: ObservableObject {
         destinationURL = nil
         inputDetail = nil
         inputLooksEncrypted = false
+        inputIsDirectory = false
+        containerHoldsDirectory = false
         successMessage = nil
         lastOutputURL = nil
+    }
+
+    private func folderSummary(_ url: URL) -> String {
+        let survey = try? TarWriter.survey(root: url)
+        let count = survey?.summary.fileCount ?? 0
+        let folders = survey?.summary.directoryCount ?? 0
+        let links = survey?.summary.symbolicLinkCount ?? 0
+        var parts = ["\(count) file\(count == 1 ? "" : "s")", "\(folders) folder\(folders == 1 ? "" : "s")"]
+        if links > 0 { parts.append("\(links) link\(links == 1 ? "" : "s")") }
+        return parts.joined(separator: " · ") + " · \(url.deletingLastPathComponent().lastPathComponent)/\(url.lastPathComponent)"
+    }
+
+    private func fileSize(of url: URL) -> Int {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
     }
 
     private func describe(_ url: URL, size: Int) -> String {
@@ -240,6 +275,13 @@ final class AppModel: ObservableObject {
     func defaultDestination(for input: URL, mode: Mode) -> URL {
         switch mode {
         case .encrypt:
+            // A folder becomes a sibling `.fcrypt` container rather than
+            // `Folder.fcrypt` sitting inside itself, which is what appending an
+            // extension to a directory would mean.
+            if inputIsDirectory {
+                return input.deletingLastPathComponent()
+                    .appendingPathComponent(input.lastPathComponent + ".fcrypt")
+            }
             return input.appendingPathExtension("fcrypt")
         case .decrypt:
             if input.pathExtension.lowercased() == "fcrypt" {
@@ -262,12 +304,13 @@ final class AppModel: ObservableObject {
     func chooseInputFile() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
-        panel.canChooseDirectories = false
+        // A folder can be encrypted as a single container, so it is offered.
+        panel.canChooseDirectories = mode == .encrypt
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
         panel.prompt = "Choose"
         panel.message = mode == .encrypt
-            ? "Choose the file you want to encrypt."
+            ? "Choose the file or folder you want to encrypt."
             : "Choose the .fcrypt file you want to decrypt."
         if panel.runModal() == .OK, let url = panel.url {
             setInputFile(url)
@@ -279,7 +322,9 @@ final class AppModel: ObservableObject {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = destinationURL?.lastPathComponent ?? "output.fcrypt"
-        panel.message = "Where should the result be saved?"
+        panel.message = mode == .decrypt && containerHoldsDirectory
+            ? "Choose a name for the restored folder."
+            : "Where should the result be saved?"
         if panel.runModal() == .OK, let url = panel.url {
             destinationURL = url
         }
@@ -348,12 +393,14 @@ final class AppModel: ObservableObject {
         guard let inputURL else { return }
         let destination = destinationURL ?? defaultDestination(for: inputURL, mode: mode)
 
-        // A directory at the destination is not something to "replace", so it
-        // must not reach the overwrite prompt. Reporting it here avoids both
-        // the misleading question and a full encrypt-then-fail cycle.
+        // A directory at the destination is not something to "replace" *when
+        // the result is a file* — reporting it here avoids a misleading prompt
+        // and a full encrypt-then-fail cycle. When the result is itself a
+        // folder, an existing folder at that path is the ordinary overwrite
+        // case and belongs at the confirmation below.
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory) {
-            if isDirectory.boolValue {
+            if isDirectory.boolValue, !destinationHoldsFolder {
                 present(error: "\u{201C}\(destination.lastPathComponent)\u{201D} is a folder. "
                     + "Choose a file name for the result, or pick another folder.")
                 return
